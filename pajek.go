@@ -8,85 +8,26 @@ import (
     "sync"
     "time"
     "strings"
-    "io"
-    "regexp"
+    "io/ioutil"
     "net/http"
-    "golang.org/x/net/html"
 )
 
 var urlQueue chan string
 var urlQueueMutex sync.Mutex
 
 var visitedUrls map[string]bool
+var visitedUrlsCntr uint64 = 0
 var visitedUrlsMutex sync.Mutex
 
-func findLinks(body io.ReadCloser) []string {
-    res := make([]string, 0)
-
-    z := html.NewTokenizer(body)
-    for {
-        token := z.Next()
-        if token == html.ErrorToken {
-            break
-        }
-
-        tn, hasAttr := z.TagName()
-        tagName := string(tn)
-        if tagName == "a" && hasAttr {
-            for {
-                key, val, moreAttr := z.TagAttr()
-                if string(key) == "href" {
-                    res = append(res, string(val))
-                }
-
-                if moreAttr { continue }
-                break
-            }
-        }
-    }
-
-    return res
-}
-
-func enqueueLinks(baseUrl string, links []string) {
-    pathSepRegex, err := regexp.Compile("[a-z 0-9]/")
-    if err != nil {
-        fmt.Println(err)
-        os.Exit(1)
-    }
-
+func enqueueLinks(links []string, baseUrl string) {
     for i := range links {
         link := links[i]
-        var sb strings.Builder
+        url := getFullUrl(baseUrl, link)
 
-        if strings.HasPrefix(link, "http://") || strings.HasPrefix(link, "https://") {
-            sb.WriteString(link)
-        } else if strings.HasPrefix(link, "//") {
-            prefix := strings.Split(baseUrl, ":")[0]
-            sb.WriteString(prefix)
-            sb.WriteRune(':')
-            sb.WriteString(link)
-        } else if strings.HasPrefix(link, "/") {
-            splitIdx := pathSepRegex.FindStringIndex(baseUrl)
-            if splitIdx == nil {
-                sb.WriteString(baseUrl)
-            } else {
-                sb.WriteString(baseUrl[:splitIdx[1]])
-            }
-            sb.WriteString(link)
-        } else {
-            sb.WriteString(baseUrl)
-            if !strings.HasSuffix(baseUrl, "/") {
-                sb.WriteRune('/')
-            }
-            sb.WriteString(link)
-        }
-
-        // TODO: What to do if queue is full?
+        // Url gets discarded, if queue is full.
         urlQueueMutex.Lock()
         if len(urlQueue) < cap(urlQueue) {
-            fmt.Println(sb.String())
-            urlQueue <- sb.String()
+            urlQueue <- url
         }
         urlQueueMutex.Unlock()
     }
@@ -110,25 +51,29 @@ func crawl() {
             continue
         } else {
             visitedUrls[url] = true
+            visitedUrlsCntr++
         }
         visitedUrlsMutex.Unlock()
 
-        //fmt.Println("Fetching:", url)
+        fmt.Println("Fetching:", url)
         resp, err := client.Get(url)
         if err != nil {
             fmt.Println(err)
             continue
         }
 
-        /*
-        body, err := ioutil.ReadAll(resp.Body)
-        fmt.Println(body)
-        */
-
         contentType := resp.Header["Content-Type"][0]
         if strings.HasPrefix(contentType, "text/html;") {
-            links := findLinks(resp.Body)
-            enqueueLinks(url, links)
+            body, err := ioutil.ReadAll(resp.Body)
+            if err != nil {
+                fmt.Println(err)
+                continue
+            }
+
+            parseBody(body, url)
+
+            links := findLinks(body)
+            enqueueLinks(links, url)
         }
 
         resp.Body.Close()
@@ -143,7 +88,7 @@ func main() {
         os.Exit(1)
     }
 
-    urlQueue = make(chan string, 5000)
+    urlQueue = make(chan string, 5*10^5)
     for i := range argsWithoutProg {
         urlQueue <- argsWithoutProg[i]
     }
@@ -155,7 +100,5 @@ func main() {
         go crawl()
     }
 
-
     select {}
-
 }
